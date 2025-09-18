@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Web Bluetooth 掃描範例（UUID / 廣告 raw data）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif; padding: 18px; }
+    button { margin: 6px 6px 6px 0; padding: 8px 12px; }
+    pre { background:#111; color:#0f0; padding:12px; max-height:400px; overflow:auto; }
+    .note { color:#555; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h2>Web Bluetooth 掃描示範</h2>
+
+  <div>
+    <button id="btn-request-device">1) 用 requestDevice() 選裝置並連線 (GATT)</button>
+    <button id="btn-start-scan">2) 開始 LE 掃描 (advertising / raw)</button>
+    <button id="btn-stop-scan">停止掃描</button>
+  </div>
+
+  <p class="note">
+    提示：若想抓 manufacturer data / advertising packet，請用按鈕 2（需瀏覽器支援 Scanning API）。
+    若不確定，先嘗試 1)。
+  </p>
+
+  <h3>掃描 / 連線紀錄</h3>
+  <pre id="log">準備中…</pre>
+
+<script>
+const logEl = document.getElementById('log');
+function log(...args){
+  const txt = args.map(a => (typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a))).join(' ');
+  logEl.textContent = new Date().toLocaleTimeString() + '  ' + txt + '\\n' + logEl.textContent;
+}
+
+// helper: ArrayBuffer -> hex
+function ab2hex(buffer){
+  const u8 = new Uint8Array(buffer);
+  return Array.from(u8).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+document.getElementById('btn-request-device').addEventListener('click', async () => {
+  if (!navigator.bluetooth) {
+    log('瀏覽器不支援 Web Bluetooth API。請用 Chrome 並確認在 HTTPS 或 localhost。');
+    return;
+  }
+
+  try {
+    // 範例：接受所有裝置（可填 filters 限定 service 或 name）
+    const device = await navigator.bluetooth.requestDevice({
+      // 若要限定某些 service，可用 filters: [{services: ['battery_service']}] 或 namePrefix
+      acceptAllDevices: true,
+      optionalServices: ['generic_access','device_information'] // 想要讀取更多 services 時加上
+    });
+    log('選到裝置：', device.name || '(no name)', 'id=', device.id);
+
+    // 監聽斷線
+    device.addEventListener('gattserverdisconnected', () => {
+      log('裝置已斷線：', device.name || device.id);
+    });
+
+    // 連線 GATT
+    const server = await device.gatt.connect();
+    log('GATT 已連線');
+
+    // 取得 device info service（若存在）
+    try {
+      const service = await server.getPrimaryService('device_information');
+      const chars = await service.getCharacteristics();
+      for (const c of chars) {
+        log('Characteristic:', c.uuid);
+        // 嘗試讀取（若可讀）
+        if (c.properties.read) {
+          const val = await c.readValue();
+          log('  讀到值 (hex):', ab2hex(val.buffer));
+        }
+      }
+    } catch (err) {
+      log('未找到 device_information service 或讀取失敗:', err.message);
+    }
+
+    // 範例結束，不自動斷線（你可以依需求斷線）
+    // await server.disconnect();
+  } catch (err) {
+    log('requestDevice 除錯：', err && err.message ? err.message : err);
+  }
+});
+
+let scanWatcher = null;
+
+document.getElementById('btn-start-scan').addEventListener('click', async () => {
+  if (!navigator.bluetooth) {
+    log('瀏覽器不支援 Web Bluetooth API。');
+    return;
+  }
+
+  // 檢查是否支援 requestLEScan（Scanning API）
+  if (!('requestLEScan' in navigator.bluetooth)) {
+    log('此瀏覽器不支援 requestLEScan。你仍可使用 requestDevice() 來連線，但無法掃描 advertising raw data。');
+    return;
+  }
+
+  try {
+    // acceptAllAdvertisements = true 會要求更多權限
+    const options = {
+      acceptAllAdvertisements: true,
+      keepRepeatedDevices: true, // 保留重複報告（若想每次都看到）
+      // 間可加 filters: [{services: ['feaa']}] 以限制只掃特定 service
+    };
+    scanWatcher = await navigator.bluetooth.requestLEScan(options);
+    log('開始掃描 LE 廣播（acceptAllAdvertisements=true）');
+
+    // 監聽 advertisementreceived 事件
+    navigator.bluetooth.addEventListener('advertisementreceived', event => {
+      try {
+        // event 內包含：device, rssi, txPower, uuids, manufacturerData, serviceData
+        const d = event.device;
+        log('=== 廣播封包 ===');
+        log('裝置 name:', d.name, 'id:', d.id);
+        log('RSSI:', event.rssi, ' txPower:', event.txPower);
+        log('UUIDs:', event.uuids);
+
+        // manufacturerData 是一個 Map-like structure
+        if (event.manufacturerData && event.manufacturerData.size) {
+          for (const [companyId, dataView] of event.manufacturerData) {
+            // companyId 是廠商代碼（16-bit），dataView 是 DataView
+            const raw = new Uint8Array(dataView.buffer);
+            log(`Manufacturer (companyId=${companyId}) raw (hex):`, ab2hex(raw));
+          }
+        } else {
+          log('No manufacturerData');
+        }
+
+        // serviceData（若有）
+        if (event.serviceData && event.serviceData.size) {
+          for (const [svcUuid, dataView] of event.serviceData) {
+            log(`ServiceData uuid=${svcUuid} hex=`, ab2hex(dataView.buffer));
+          }
+        }
+
+      } catch (e) {
+        log('advertisementreceived handler error:', e && e.message || e);
+      }
+    });
+
+    // 你也可以用 interval 查看 scanWatcher.active
+    (function watcher(){
+      if (scanWatcher && scanWatcher.active) {
+        setTimeout(watcher, 2000);
+      } else {
+        log('掃描已停止或不可用');
+      }
+    })();
+
+  } catch (err) {
+    log('requestLEScan 失敗：', err && err.message ? err.message : err);
+  }
+});
+
+document.getElementById('btn-stop-scan').addEventListener('click', () => {
+  if (scanWatcher) {
+    try {
+      scanWatcher.stop();
+      scanWatcher = null;
+      log('已停止掃描');
+    } catch (e) {
+      log('停止掃描失敗：', e && e.message || e);
+    }
+  } else {
+    log('目前沒有在掃描');
+  }
+});
+</script>
+</body>
+</html>
