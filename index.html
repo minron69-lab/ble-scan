@@ -1,143 +1,86 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="utf-8" />
-  <title>Web Bluetooth 掃描範例（UUID / 廣告 raw data）</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="utf-8">
+  <title>BLE Raw 掃描測試</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif; padding: 18px; }
-    button { margin: 6px 6px 6px 0; padding: 8px 12px; }
-    pre { background:#111; color:#0f0; padding:12px; max-height:400px; overflow:auto; }
-    .note { color:#555; margin-top:8px; }
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    button { margin: 5px; padding: 8px 12px; }
+    pre { background: #111; color: #0f0; padding: 10px; max-height: 400px; overflow: auto; }
   </style>
 </head>
 <body>
-  <h2>Web Bluetooth 掃描示範</h2>
+  <h2>Web Bluetooth Raw 掃描 (不連線)</h2>
 
-  <div>
-    <button id="btn-request-device">1) 用 requestDevice() 選裝置並連線 (GATT)</button>
-    <button id="btn-start-scan">2) 開始 LE 掃描 (advertising / raw)</button>
-    <button id="btn-stop-scan">停止掃描</button>
-  </div>
+  <button id="scan">開始掃描 raw 廣告</button>
+  <button id="stop">停止掃描</button>
 
-  <p class="note">
-    提示：若想抓 manufacturer data / advertising packet，請用按鈕 2（需瀏覽器支援 Scanning API）。
-    若不確定，先嘗試 1)。
-  </p>
-
-  <h3>掃描 / 連線紀錄</h3>
+  <h3>掃描結果</h3>
   <pre id="log">準備中…</pre>
 
 <script>
 const logEl = document.getElementById('log');
-const btnReq = document.getElementById('btn-request-device');
-const btnStart = document.getElementById('btn-start-scan');
-const btnStop  = document.getElementById('btn-stop-scan');
-
-function log(...args){
-  const txt = args.map(a => (typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a))).join(' ');
+function log(...a){
+  const txt = a.join(' ');
   logEl.textContent = new Date().toLocaleTimeString() + '  ' + txt + '\n' + logEl.textContent;
 }
-function ab2hex(buf){ return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
-function setScanUI(scanning){ btnStart.disabled = scanning; btnStop.disabled = !scanning; }
-
-let scanWatcher = null;
-let abortCtrl   = null;
-let advHandler  = null;
-
-function cleanupScan(){
-  try { if (advHandler) navigator.bluetooth.removeEventListener('advertisementreceived', advHandler); } catch(e){}
-  advHandler = null;
-  try { if (scanWatcher) scanWatcher.stop(); } catch(e){}
-  scanWatcher = null;
-  try { if (abortCtrl) abortCtrl.abort(); } catch(e){}
-  abortCtrl = null;
-  setScanUI(false);
+function ab2hex(buf){
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
-// ==== 1) 連線(GATT) ====
-btnReq.addEventListener('click', async () => {
-  if (!navigator.bluetooth) return log('此瀏覽器不支援 Web Bluetooth');
-  try {
-    const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: ['generic_access','device_information']
-    });
-    log('選到裝置：', device.name || '(no name)', 'id=', device.id);
-    device.addEventListener('gattserverdisconnected', () => log('裝置已斷線：', device.name || device.id));
-    const server = await device.gatt.connect();
-    log('GATT 已連線');
-    try {
-      const svc = await server.getPrimaryService('device_information');
-      const chars = await svc.getCharacteristics();
-      for (const c of chars) {
-        log('Characteristic:', c.uuid);
-        if (c.properties.read) {
-          const v = await c.readValue();
-          log('  讀到值(hex):', ab2hex(v.buffer));
-        }
-      }
-    } catch(e){ log('讀取 device_information 失敗：', e.message || e); }
-  } catch(e){
-    // 使用者取消或拒絕 → 不中斷之後的操作
-    log('未連線（可能取消或拒絕）：', e.name || e.message || e);
-  }
-});
+let watcher=null, advHandler=null, abortCtrl=null;
 
-// ==== 2) 掃描(raw advertising) ====
-btnStart.addEventListener('click', async () => {
-  if (!navigator.bluetooth) return log('此瀏覽器不支援 Web Bluetooth');
-  if (!('requestLEScan' in navigator.bluetooth)) {
-    log('此瀏覽器不支援 raw 廣告掃描（requestLEScan）。改用上面「連線(GATT)」按鈕測試吧～');
+function cleanup(){
+  try{ advHandler && navigator.bluetooth.removeEventListener('advertisementreceived', advHandler);}catch{}
+  advHandler=null;
+  try{ watcher && watcher.stop(); }catch{}
+  watcher=null;
+  try{ abortCtrl && abortCtrl.abort(); }catch{}
+  abortCtrl=null;
+}
+
+document.getElementById('scan').onclick = async () => {
+  if (!navigator.bluetooth || !('requestLEScan' in navigator.bluetooth)){
+    log('❌ 此瀏覽器不支援 raw 掃描（requestLEScan）。');
+    log('👉 建議用 Android Chrome，並確認開啟 Experimental Web Platform features。');
     return;
   }
-  if (scanWatcher && scanWatcher.active) {
-    log('已在掃描中，請先按「停止掃描」。');
-    return;
-  }
-
   try {
     abortCtrl = new AbortController();
-    scanWatcher = await navigator.bluetooth.requestLEScan({
+    watcher = await navigator.bluetooth.requestLEScan({
       acceptAllAdvertisements: true,
       keepRepeatedDevices: true,
       signal: abortCtrl.signal
     });
-    setScanUI(true);
-    log('開始掃描 LE 廣播…');
+    log('✅ 開始掃描 raw 廣告…');
 
-    advHandler = (event) => {
-      const d = event.device;
-      log('=== 廣播 === name:', d.name, ' id:', d.id, ' RSSI:', event.rssi, ' txPower:', event.txPower);
-      if (event.uuids?.length) log('UUIDs:', event.uuids);
-      if (event.manufacturerData?.size) {
-        for (const [cid, dv] of event.manufacturerData) {
-          log(`MFD companyId=${cid} hex=`, ab2hex(dv.buffer));
+    advHandler = (e) => {
+      const name = e.device.name || '(no name)';
+      log(`🔹 ADV name=${name} id=${e.device.id} RSSI=${e.rssi}`);
+      if (e.manufacturerData?.size){
+        for (const [cid, dv] of e.manufacturerData){
+          log(`  MFD companyId=${cid} hex=${ab2hex(dv.buffer)}`);
         }
-      } else {
-        log('No manufacturerData');
       }
-      if (event.serviceData?.size) {
-        for (const [u, dv] of event.serviceData) log(`ServiceData ${u} hex=`, ab2hex(dv.buffer));
+      if (e.serviceData?.size){
+        for (const [uuid, dv] of e.serviceData){
+          log(`  SVC ${uuid} hex=${ab2hex(dv.buffer)}`);
+        }
       }
     };
     navigator.bluetooth.addEventListener('advertisementreceived', advHandler);
 
-  } catch(e){
-    // **關掉授權視窗 / 拒絕權限** 會進到這裡
-    log('未開始掃描（可能取消/拒絕）：', e.name || e.message || e);
-    cleanupScan(); // ← 這行是關鍵：確保下次可再次按下開始
+  } catch(err){
+    log('⚠️ 掃描未開始（可能取消或拒絕權限）：', err.name || err.message);
+    cleanup();
   }
-});
+};
 
-btnStop.addEventListener('click', () => {
-  cleanupScan();
-  log('已停止掃描');
-});
-
-// 初始 UI
-setScanUI(false);
+document.getElementById('stop').onclick = () => {
+  cleanup();
+  log('⏹️ 已停止掃描');
+};
 </script>
 </body>
 </html>
-
