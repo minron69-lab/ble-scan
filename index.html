@@ -2,18 +2,19 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <title>BLE Raw 掃描測試（含支援偵測與 fallback）</title>
+  <title>BLE Raw 掃描診斷頁</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: Arial, sans-serif; padding:20px; }
+    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans TC",sans-serif; padding:20px; }
     button { margin:4px; padding:8px 12px; }
     pre { background:#111; color:#0f0; padding:10px; max-height:420px; overflow:auto; }
-    .hint { color:#555; margin-top:6px; }
+    .hint { color:#555; margin-top:8px; }
   </style>
 </head>
 <body>
-  <h2>Web Bluetooth Raw 掃描</h2>
+  <h2>BLE Raw 掃描診斷</h2>
   <div>
+    <button id="env">環境檢查</button>
     <button id="scan">開始掃描 raw（不連線）</button>
     <button id="stop" disabled>停止掃描</button>
     <button id="fallback">改用連線 (requestDevice)</button>
@@ -21,25 +22,44 @@
   <div class="hint">
     建議用 <b>Android 版 Chrome</b>，並在 <code>chrome://flags</code> 啟用
     <b>Experimental Web Platform features</b>。<br>
-    若 10 秒內沒有任何廣告，會顯示排查建議。
+    Android 還需在系統設定授予 Chrome 的「位置」與「附近的裝置」權限。
   </div>
 
   <h3>Log</h3>
   <pre id="log">準備中…</pre>
 
 <script>
-const $ = (id)=>document.getElementById(id);
+const $ = id => document.getElementById(id);
 const logEl = $('log');
-const btnScan = $('scan'), btnStop = $('stop'), btnFallback = $('fallback');
-
 function log(...a){
   const txt = a.map(x => typeof x==='object' ? JSON.stringify(x,null,2) : String(x)).join(' ');
   logEl.textContent = new Date().toLocaleTimeString()+'  '+txt+'\n'+logEl.textContent;
 }
 function ab2hex(buf){ return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
-function setScanUI(scanning){ btnScan.disabled=scanning; btnStop.disabled=!scanning; }
+function setScanUI(scanning){ $('scan').disabled=scanning; $('stop').disabled=!scanning; }
 
-let watcher=null, advHandler=null, abortCtrl=null, firstSeenTs=null, timeoutId=null;
+let watcher=null, advHandler=null, abortCtrl=null, timeoutId=null, firstSeen=false;
+
+async function envCheck(){
+  log('UA:', navigator.userAgent);
+  log('navigator.bluetooth =', !!navigator.bluetooth);
+  if (navigator.bluetooth){
+    try{
+      const avail = await navigator.bluetooth.getAvailability();
+      log('Bluetooth radio available =', avail);
+    }catch(e){ log('getAvailability error:', e.message || e); }
+    log('requestDevice exists =', !!navigator.bluetooth.requestDevice);
+    log('requestLEScan exists =', !!navigator.bluetooth.requestLEScan);
+  }
+  // 位置權限（部分平台才有）
+  if (navigator.permissions && navigator.permissions.query){
+    try{
+      const geo = await navigator.permissions.query({name:'geolocation'});
+      log('geolocation permission =', geo.state);
+    }catch(e){ log('geolocation permission check failed (not critical).'); }
+  }
+  log('提示: 桌機 Chrome 多半無法拿 raw 廣告；Android Chrome 支援最佳。');
+}
 
 function cleanup(){
   try{ advHandler && navigator.bluetooth.removeEventListener('advertisementreceived', advHandler);}catch(e){}
@@ -52,16 +72,11 @@ function cleanup(){
   setScanUI(false);
 }
 
-function envCheck(){
-  log('環境檢查：navigator.bluetooth =', !!navigator.bluetooth);
-  log('支援 requestLEScan =', !!(navigator.bluetooth && 'requestLEScan' in navigator.bluetooth));
-}
+$('env').onclick = envCheck;
 
-envCheck();
-
-btnScan.onclick = async () => {
+$('scan').onclick = async () => {
   if (!navigator.bluetooth || !('requestLEScan' in navigator.bluetooth)){
-    log('❌ 此環境不支援 raw 掃描（requestLEScan）。請改用 Android Chrome 或按下「改用連線」。');
+    log('❌ 不支援 requestLEScan（raw 掃描）。請改用 Android Chrome，或按「改用連線」。');
     return;
   }
   try{
@@ -72,21 +87,20 @@ btnScan.onclick = async () => {
       signal: abortCtrl.signal
     });
     setScanUI(true);
-    firstSeenTs = null;
-    log('✅ 開始掃描…（請將裝置靠近，並確認它在廣播）');
+    firstSeen = false;
+    log('✅ 開始掃描…請將裝置靠近且保持未連線狀態。');
 
-    // 若 10 秒內完全沒收到任何廣告，給提示
-    timeoutId = setTimeout(() => {
-      if (!firstSeenTs){
-        log('⚠️ 10 秒內未收到廣告：');
-        log('  1) 確認 Android Chrome，且已啟用 Experimental Web Platform features');
-        log('  2) 檢查站台/系統權限：藍牙、附近裝置、位置');
-        log('  3) 用 nRF Connect 確認裝置真的在廣播（未連線狀態）');
+    timeoutId = setTimeout(()=>{
+      if (!firstSeen){
+        log('⚠️ 10 秒內無任何廣告:');
+        log('  • 確認 Android Chrome，chrome://flags 開啟 Experimental Web Platform features 後重啟');
+        log('  • 系統/站台權限：藍牙、附近裝置、位置 → 皆允許');
+        log('  • 用 nRF Connect 先確認裝置真的在廣播（未連線時）');
       }
     }, 10000);
 
     advHandler = (e)=>{
-      if (!firstSeenTs) firstSeenTs = Date.now();
+      if (!firstSeen) firstSeen = true;
       const name = e.device.name || '(no name)';
       log(`🔹 ADV name=${name} id=${e.device.id} RSSI=${e.rssi} tx=${e.txPower}`);
       if (e.uuids?.length) log('  UUIDs:', e.uuids.join(', '));
@@ -105,30 +119,22 @@ btnScan.onclick = async () => {
     };
     navigator.bluetooth.addEventListener('advertisementreceived', advHandler);
 
-  } catch(err){
-    log('⚠️ 掃描未開始（可能關閉或拒絕權限）：', err.name || err.message);
+  }catch(err){
+    log('⚠️ 掃描未開始（可能取消/拒絕）：', err.name || err.message);
     cleanup();
   }
 };
 
-btnStop.onclick = () => {
-  cleanup();
-  log('⏹️ 已停止掃描');
-};
+$('stop').onclick = ()=>{ cleanup(); log('⏹️ 已停止掃描'); };
 
-// Fallback：不支援 raw 時，至少讓你選裝置並讀幾個 characteristic
-btnFallback.onclick = async () => {
-  if (!navigator.bluetooth){
-    log('❌ 此瀏覽器不支援 Web Bluetooth。');
-    return;
-  }
+$('fallback').onclick = async () => {
+  if (!navigator.bluetooth){ log('❌ 此瀏覽器不支援 Web Bluetooth。'); return; }
   try{
     const device = await navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
       optionalServices: ['generic_access','device_information']
     });
     log('選到裝置：', device.name || '(no name)', 'id=', device.id);
-    device.addEventListener('gattserverdisconnected', () => log('裝置已斷線：', device.name || device.id));
     const server = await device.gatt.connect();
     log('GATT 已連線');
     try{
@@ -146,6 +152,9 @@ btnFallback.onclick = async () => {
     log('未連線（可能取消/拒絕）：', e.name || e.message || e);
   }
 };
+
+// 頁面開啟先做一次環境檢查
+envCheck();
 </script>
 </body>
 </html>
